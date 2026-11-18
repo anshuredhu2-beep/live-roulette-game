@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Secure Live Game</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; background: #0f172a; color: white; margin: 0; padding: 15px; }
+        .card { background: #1e293b; padding: 20px; border-radius: 10px; max-width: 600px; margin: 20px auto; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }
+        input, select, button { padding: 10px; margin: 5px 0; border-radius: 5px; border: none; }
+        input { background: #334155; color: white; width: 95%; }
+        button { background: #eab308; color: black; font-weight: bold; cursor: pointer; }
+        button:hover { background: #ca8a04; }
+        .btn-red { background: #dc2626; color: white; }
+        .btn-black { background: #000000; color: white; border: 1px solid #475569; }
+        .btn-green { background: #16a34a; color: white; }
+        .timer-box { font-size: 2rem; text-align: center; padding: 15px; background: #020617; border-radius: 10px; margin: 15px 0; border: 2px solid #38bdf8; }
+        .secret-box { background: #450a0a; border: 2px solid #ef4444; padding: 15px; border-radius: 8px; margin-top: 15px; }
+        .grid-nums { display: grid; grid-template-columns: repeat(6, 1fr); gap: 5px; margin-top: 10px; }
+        .num-btn { padding: 10px; text-align: center; font-weight: bold; cursor: pointer; border-radius: 4px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        th, td { border-bottom: 1px solid #334155; padding: 8px; text-align: left; }
+        .locked { opacity: 0.5; pointer-events: none; }
+    </style>
+</head>
+<body>
+
+{% if not user %}
+    <div class="card">
+        <h2>🎮 Live Game Login</h2>
+        {% if error %}<p style="color: #ef4444;">{{ error }}</p>{% endif %}
+        <form method="POST">
+            <input type="text" name="username" placeholder="User ID" required>
+            <input type="password" name="password" placeholder="Password" required>
+            <button type="submit" style="width: 100%; margin-top: 10px;">Login</button>
+        </form>
+    </div>
+{% else %}
+    <div class="card">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+            <div>
+                <strong>ID:</strong> {{ user.username }} ({{ user.role.upper() }}) <br>
+                {% if user.role == 'player' %}
+                    <strong>Points:</strong> <span id="my-points" style="color:#4ade80; font-size:1.3rem;">{{ user.points }}</span>
+                {% endif %}
+            </div>
+            <a href="/logout"><button style="background:#ef4444; color:white;">Logout</button></a>
+        </div>
+
+        <div class="timer-box" id="timer-display">
+            ⏳ Round Starting...
+        </div>
+
+        {% if user.role == 'admin' %}
+            <div class="secret-box">
+                <h3>🔒 ADMIN PREVIEW (Lowest Bet Winner)</h3>
+                <p><strong>Next Winner:</strong> <span id="pred-winner" style="color:#fde047; font-size:1.3rem;">0 (GREEN)</span></p>
+                <p><strong>Total Bets:</strong> <span id="bet-count">0</span></p>
+                <div id="live-bets-list" style="font-size: 0.9rem; color: #fca5a5;"></div>
+            </div>
+
+            <hr style="border-color:#334155; margin:20px 0;">
+            <h3>➕ Naya Player ID Banayein</h3>
+            <input type="text" id="new-user" placeholder="Player ID">
+            <input type="text" id="new-pass" placeholder="Password">
+            <input type="number" id="new-pts" placeholder="Starting Points">
+            <button onclick="createUser()">Create Player</button>
+
+            <h3>👥 Players Points Management</h3>
+            <table>
+                <tr><th>Player</th><th>Points</th><th>Action</th></tr>
+                {% for u in users %}
+                <tr>
+                    <td>{{ u.username }}</td>
+                    <td id="pts-{{ u.username }}">{{ u.points }}</td>
+                    <td>
+                        <button onclick="updatePts('{{ u.username }}', 500)">+500</button>
+                        <button onclick="updatePts('{{ u.username }}', -500)" style="background:#ef4444; color:white;">-500</button>
+                    </td>
+                </tr>
+                {% endfor %}
+            </table>
+
+        {% else %}
+            <div id="betting-container">
+                <h3>💰 Bet Amount</h3>
+                <input type="number" id="bet-amount" value="50" min="10">
+
+                <h3>🎯 Color / Choice (2x Payout)</h3>
+                <div style="display:flex; gap:10px;">
+                    <button class="btn-red" style="flex:1;" onclick="placeBet('color', 'RED')">RED (2x)</button>
+                    <button class="btn-black" style="flex:1;" onclick="placeBet('color', 'BLACK')">BLACK (2x)</button>
+                </div>
+                <div style="display:flex; gap:10px; margin-top:5px;">
+                    <button style="flex:1; background:#3b82f6; color:white;" onclick="placeBet('parity', 'EVEN')">EVEN (2x)</button>
+                    <button style="flex:1; background:#8b5cf6; color:white;" onclick="placeBet('parity', 'ODD')">ODD (2x)</button>
+                </div>
+
+                <h3>🔢 Number (36x Payout)</h3>
+                <button class="btn-green" style="width:100%;" onclick="placeBet('number', '0')">0 (GREEN)</button>
+                <div class="grid-nums" id="num-grid"></div>
+            </div>
+        {% endif %}
+    </div>
+{% endif %}
+
+<script>
+    const socket = io({ transport: ['websocket', 'polling'] });
+    const currentUser = "{{ user.username if user else '' }}";
+    const redNums = [1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36];
+
+    const grid = document.getElementById("num-grid");
+    if (grid) {
+        for (let i = 1; i <= 36; i++) {
+            const btn = document.createElement("div");
+            btn.className = "num-btn " + (redNums.includes(i) ? "btn-red" : "btn-black");
+            btn.innerText = i;
+            btn.onclick = () => placeBet('number', i.toString());
+            grid.appendChild(btn);
+        }
+    }
+
+    function placeBet(type, value) {
+        const amount = parseInt(document.getElementById("bet-amount").value);
+        if (!amount || amount <= 0) return alert("Sahi points dalein!");
+        socket.emit("place_bet", { type: type, value: value, amount: amount });
+    }
+
+    function createUser() {
+        fetch("/admin/create_user", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                username: document.getElementById("new-user",).value,
+                password: document.getElementById("new-pass").value,
+                points: document.getElementById("new-pts").value || 0
+            })
+        }).then(r => r.json()).then(d => {
+            if (d.status === "ok") location.reload();
+            else alert(d.msg);
+        });
+    }
+
+    function updatePts(username, amount) {
+        fetch("/admin/update_points", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ username: username, amount: amount })
+        });
+    }
+
+    socket.on("timer_update", (data) => {
+        const timerBox = document.getElementById("timer-display");
+        const betContainer = document.getElementById("betting-container");
+
+        if (data.status === "BETTING") {
+            timerBox.innerHTML = `🟢 Betting Open: <span style="color:#4ade80;">${data.timer}s</span> remaining`;
+            if (betContainer) betContainer.classList.remove("locked");
+        } else if (data.status === "LOCKED") {
+            timerBox.innerHTML = `🔒 Locked! Result in: <span style="color:#f87171;">${data.timer}s</span>`;
+            if (betContainer) betContainer.classList.add("locked");
+        }
+    });
+
+    socket.on("round_ended", (data) => {
+        const timerBox = document.getElementById("timer-display");
+        timerBox.innerHTML = `🎉 Winner: <strong>${data.winning_num} (${data.winning_color})</strong><br><small style="color:#4ade80;">${data.winners.join(", ") || "No Winners"}</small>`;
+        
+        data.users.forEach(u => {
+            if (u.username === currentUser) {
+                const el = document.getElementById("my-points");
+                if (el) el.innerText = u.points;
+            }
+            const adminCell = document.getElementById("pts-" + u.username);
+            if (adminCell) adminCell.innerText = u.points;
+        });
+
+        const predEl = document.getElementById("pred-winner");
+        if (predEl) {
+            predEl.innerText = "0 (GREEN)";
+            document.getElementById("bet-count").innerText = "0";
+            document.getElementById("live-bets-list").innerHTML = "";
+        }
+    });
+
+    socket.on("points_updated", (data) => {
+        if (data.username === currentUser) {
+            const el = document.getElementById("my-points");
+            if (el) el.innerText = data.points;
+        }
+        const adminCell = document.getElementById("pts-" + data.username);
+        if (adminCell) adminCell.innerText = data.points;
+    });
+
+    socket.on("admin_preview", (data) => {
+        const predEl = document.getElementById("pred-winner");
+        if (predEl) {
+            predEl.innerText = `${data.predicted_num} (${data.predicted_color}) | Payout: ${data.min_payout}`;
+            document.getElementById("bet-count").innerText = data.bets.length;
+            document.getElementById("live-bets-list").innerHTML = data.bets.map(b => 
+                `• ${b.username}: ${b.amount} pts on ${b.value}`
+            ).join("<br>");
+        }
+    });
+</script>
+</body>
+</html>
