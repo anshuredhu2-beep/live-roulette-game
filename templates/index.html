@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Secure Live Game</title>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.js"></script>
     <style>
         body { font-family: Arial, sans-serif; background: #0f172a; color: white; margin: 0; padding: 15px; }
         .card { background: #1e293b; padding: 20px; border-radius: 10px; max-width: 600px; margin: 20px auto; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }
@@ -15,7 +14,7 @@
         .btn-red { background: #dc2626; color: white; }
         .btn-black { background: #000000; color: white; border: 1px solid #475569; }
         .btn-green { background: #16a34a; color: white; }
-        .timer-box { font-size: 2rem; text-align: center; padding: 15px; background: #020617; border-radius: 10px; margin: 15px 0; border: 2px solid #38bdf8; }
+        .timer-box { font-size: 1.8rem; text-align: center; padding: 15px; background: #020617; border-radius: 10px; margin: 15px 0; border: 2px solid #38bdf8; }
         .secret-box { background: #450a0a; border: 2px solid #ef4444; padding: 15px; border-radius: 8px; margin-top: 15px; }
         .grid-nums { display: grid; grid-template-columns: repeat(6, 1fr); gap: 5px; margin-top: 10px; }
         .num-btn { padding: 10px; text-align: center; font-weight: bold; cursor: pointer; border-radius: 4px; }
@@ -49,7 +48,7 @@
         </div>
 
         <div class="timer-box" id="timer-display">
-            ⏳ Round Starting...
+            ⏳ Loading...
         </div>
 
         {% if user.role == 'admin' %}
@@ -94,7 +93,7 @@
                 </div>
                 <div style="display:flex; gap:10px; margin-top:5px;">
                     <button style="flex:1; background:#3b82f6; color:white;" onclick="placeBet('parity', 'EVEN')">EVEN (2x)</button>
-                    <button style="flex:1; background:#8b5cf6; color:white;" onclick="placeBet('parity', 'ODD')">ODD (2x)</button>
+                    <button style="flex:1; background:#8b5cf6; color:white;" onclick="place_bet('parity', 'ODD')">ODD (2x)</button>
                 </div>
 
                 <h3>🔢 Number (36x Payout)</h3>
@@ -106,10 +105,7 @@
 {% endif %}
 
 <script>
-    const socket = io({ transport: ['websocket', 'polling'] });
-    const currentUser = "{{ user.username if user else '' }}";
     const redNums = [1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36];
-
     const grid = document.getElementById("num-grid");
     if (grid) {
         for (let i = 1; i <= 36; i++) {
@@ -124,7 +120,17 @@
     function placeBet(type, value) {
         const amount = parseInt(document.getElementById("bet-amount").value);
         if (!amount || amount <= 0) return alert("Sahi points dalein!");
-        socket.emit("place_bet", { type: type, value: value, amount: amount });
+        
+        fetch("/place_bet", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ type: type, value: value, amount: amount })
+        }).then(r => r.json()).then(d => {
+            if (d.status === "error") alert(d.msg);
+            else {
+                document.getElementById("my-points").innerText = d.points;
+            }
+        });
     }
 
     function createUser() {
@@ -132,7 +138,7 @@
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-                username: document.getElementById("new-user",).value,
+                username: document.getElementById("new-user").value,
                 password: document.getElementById("new-pass").value,
                 points: document.getElementById("new-pts").value || 0
             })
@@ -147,62 +153,52 @@
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ username: username, amount: amount })
+        }).then(() => fetchGameState());
+    }
+
+    function fetchGameState() {
+        fetch("/api/gamestate")
+        .then(r => r.json())
+        .then(data => {
+            const timerBox = document.getElementById("timer-display");
+            const betContainer = document.getElementById("betting-container");
+
+            if (data.status === "BETTING") {
+                timerBox.innerHTML = `🟢 Betting Open: <span style="color:#4ade80;">${data.timer}s</span>`;
+                if (betContainer) betContainer.classList.remove("locked");
+            } else {
+                let winInfo = data.last_result;
+                timerBox.innerHTML = `🔒 Locked! Result: <strong>${winInfo.num} (${winInfo.color})</strong><br><small style="color:#f87171;">Next round in ${data.timer}s</small>`;
+                if (betContainer) betContainer.classList.add("locked");
+            }
+
+            // Update points if element exists
+            const myPtsEl = document.getElementById("my-points");
+            if (myPtsEl) myPtsEl.innerText = data.my_points;
+
+            // Admin preview update
+            const predEl = document.getElementById("pred-winner");
+            if (predEl) {
+                predEl.innerText = `${data.predicted_num} (${data.predicted_color}) | Payout: ${data.min_payout}`;
+                document.getElementById("bet-count").innerText = data.bets.length;
+                document.getElementById("live-bets-list").innerHTML = data.bets.map(b => 
+                    `• ${b.username}: ${b.amount} pts on ${b.value}`
+                ).join("<br>");
+            }
+
+            // Admin table update
+            if (data.all_players && data.all_players.length > 0) {
+                data.all_players.forEach(p => {
+                    const el = document.getElementById("pts-" + p.username);
+                    if (el) el.innerText = p.points;
+                });
+            }
         });
     }
 
-    socket.on("timer_update", (data) => {
-        const timerBox = document.getElementById("timer-display");
-        const betContainer = document.getElementById("betting-container");
-
-        if (data.status === "BETTING") {
-            timerBox.innerHTML = `🟢 Betting Open: <span style="color:#4ade80;">${data.timer}s</span> remaining`;
-            if (betContainer) betContainer.classList.remove("locked");
-        } else if (data.status === "LOCKED") {
-            timerBox.innerHTML = `🔒 Locked! Result in: <span style="color:#f87171;">${data.timer}s</span>`;
-            if (betContainer) betContainer.classList.add("locked");
-        }
-    });
-
-    socket.on("round_ended", (data) => {
-        const timerBox = document.getElementById("timer-display");
-        timerBox.innerHTML = `🎉 Winner: <strong>${data.winning_num} (${data.winning_color})</strong><br><small style="color:#4ade80;">${data.winners.join(", ") || "No Winners"}</small>`;
-        
-        data.users.forEach(u => {
-            if (u.username === currentUser) {
-                const el = document.getElementById("my-points");
-                if (el) el.innerText = u.points;
-            }
-            const adminCell = document.getElementById("pts-" + u.username);
-            if (adminCell) adminCell.innerText = u.points;
-        });
-
-        const predEl = document.getElementById("pred-winner");
-        if (predEl) {
-            predEl.innerText = "0 (GREEN)";
-            document.getElementById("bet-count").innerText = "0";
-            document.getElementById("live-bets-list").innerHTML = "";
-        }
-    });
-
-    socket.on("points_updated", (data) => {
-        if (data.username === currentUser) {
-            const el = document.getElementById("my-points");
-            if (el) el.innerText = data.points;
-        }
-        const adminCell = document.getElementById("pts-" + data.username);
-        if (adminCell) adminCell.innerText = data.points;
-    });
-
-    socket.on("admin_preview", (data) => {
-        const predEl = document.getElementById("pred-winner");
-        if (predEl) {
-            predEl.innerText = `${data.predicted_num} (${data.predicted_color}) | Payout: ${data.min_payout}`;
-            document.getElementById("bet-count").innerText = data.bets.length;
-            document.getElementById("live-bets-list").innerHTML = data.bets.map(b => 
-                `• ${b.username}: ${b.amount} pts on ${b.value}`
-            ).join("<br>");
-        }
-    });
+    // Poll server every 1 second for real-time sync
+    setInterval(fetchGameState, 1000);
+    fetchGameState();
 </script>
 </body>
 </html>
